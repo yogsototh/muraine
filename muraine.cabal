@@ -27,6 +27,8 @@ executable muraine
                        , conduit
                        , http-conduit
                        , http-types
+                       , lens
+                       , lens-aeson
                        , old-locale
                        , text
                        , time

@@ -4,6 +4,8 @@ module Main where
 -- import           Data.Conduit
 import qualified Data.HashMap.Strict as H
 import Data.Aeson
+import Control.Lens
+import Data.Aeson.Lens
 import Data.Vector ((!?))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -109,8 +111,8 @@ aString :: Value -> Maybe Text
 aString (String a) = Just a
 aString _ = Nothing
 
-getFirstId :: LZ.ByteString -> Maybe Text
-getFirstId body = decode body >>= anArray >>= (!? 0) >>= anObject
+getFirstId :: Maybe Value -> Maybe Text
+getFirstId events = events >>= anArray >>= (!? 0) >>= anObject
                     >>= H.lookup "id" >>= aString
 
 --------------------------------------------------------------------------------
@@ -147,9 +149,12 @@ getTimeToWaitFromHeaders headers = do
         timeBeforeReset = reset - serverDateEpoch
     return (1000000 * timeBeforeReset `div` remaining)
 
--- TODO: get the list of Ids from the body and check if firstId is in it
-containsId :: Maybe Text -> LZ.ByteString -> Bool
-containsId firstId body = True
+-- | Get the list of Ids from the body and check if firstId is in it
+containsId :: Maybe Text -> Maybe Value -> Bool
+containsId firstId events = maybe False (\i -> Just i `elem` eventsIds) firstId
+    where
+        eventsIds :: [Maybe Text]
+        eventsIds = maybe [] (^.. _Array . traverse . to (^? key "id" . _String)) events
 
 getTimeAndEtagFromResponse :: Int
                            -> Maybe B.ByteString
@@ -165,14 +170,17 @@ getTimeAndEtagFromResponse oldTime etag response req_time oldFirstId oldPage =
             t <- getTimeToWaitFromHeaders headers
             let etagResponded = lookup "ETag" headers
                 timeToWaitIn_us = max 0 (t - floor (1000000 * req_time))
-                firstId = getFirstId (responseBody response)
-                page = if containsId firstId (responseBody response) && (oldPage < 10)
+                events = decode (responseBody response)
+                firstId = getFirstId events
+                page = if containsId firstId events && (oldPage < 10)
                           then oldPage + 1
                           else 1
+                linkh = lookup "Link" headers
                 -- TODO: read all pages until we reach the first ID of the first page
                 -- of the preceeding loop
                 -- return a new page if the first ID wasn't found
-            publish (responseBody response) oldFirstId
+            publish events oldFirstId
+            print linkh
             return (timeToWaitIn_us,etagResponded,firstId,page)
         else do
             putStrLn (if notModified304 == responseStatus response
@@ -183,8 +191,8 @@ getTimeAndEtagFromResponse oldTime etag response req_time oldFirstId oldPage =
 -- takeUpUntil :: Maybe Text -> Maybe Value  -> Maybe [Value]
 -- takeUpUntil firstId = error "TODO"
 
-publish :: LZ.ByteString -> Maybe Text -> IO ()
-publish body firstId = do
+publish :: Maybe Value -> Maybe Text -> IO ()
+publish events firstId = do
     -- let mevents = decode body >>= anArray >>= takeUpUntil firstId
     -- case mevents of
     --     Just events -> mapM_ (publishOneEvent firstId) events
@@ -192,7 +200,7 @@ publish body firstId = do
     case firstId of
          Just txt -> putStrLn (T.unpack txt)
          _ -> return ()
-    (LZ.putStrLn . LZ.take 40) body
+    print events
 
 -- publishOneEvent :: Value -> IO ()
 -- publishOneEvent mEvent = putStrLn "TODO: publish to Kafka"

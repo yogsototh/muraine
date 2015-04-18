@@ -24,6 +24,14 @@ import Data.Time.Clock.POSIX (getPOSIXTime,utcTimeToPOSIXSeconds)
 import System.Locale (defaultTimeLocale)
 import System.CPUTime (getCPUTime)
 
+
+data CallInfo = CallInfo { _user :: String            -- ^ Github username
+                         , _pass :: String            -- ^ Github password
+                         , _etag :: Maybe B.ByteString  -- ^ ETag
+                         , _timeToWait :: Int         -- ^ Time to wait in micro seconds
+                         , _firstId :: Maybe Text     -- ^ First Event Id
+                         , _page :: Int               -- ^ Page
+                         } deriving (Show)
 --------------------------------------------------------------------------------
 -- MAIN
 --------------------------------------------------------------------------------
@@ -32,7 +40,7 @@ main :: IO ()
 main = do
     args <- getArgs
     case args of
-         [user,pass] -> getEvents user pass Nothing 100000 Nothing 1
+         [user,pass] -> getEvents (CallInfo user pass Nothing 100000 Nothing 1)
          _ -> showHelpAndExit
 
 --------------------------------------------------------------------------------
@@ -63,7 +71,8 @@ httpGHEvents :: String
                 -> Maybe B.ByteString
                 -> Int
                 -> IO (Response LZ.ByteString)
-httpGHEvents user pass etag page =
+httpGHEvents user pass etag page = do
+    print params
     authHttpCall "https://api.github.com/events" user pass headers params
       where
           headers = ("User-Agent","HTTP-Conduit"):
@@ -119,20 +128,13 @@ getFirstId events = events >>= anArray >>= (!? 0) >>= anObject
 --------------------------------------------------------------------------------
 
 -- | Getting events
-getEvents :: String             -- ^ Github username
-          -> String             -- ^ Github password
-          -> Maybe B.ByteString -- ^ ETag
-          -> Int                -- ^ Time to wait in micro seconds
-          -> Maybe Text         -- ^ First Event Id
-          -> Int                -- ^ Page
-          -> IO ()
-getEvents user pass etag t oldFirstId page = do
-    -- Call /events on github
-    (req_time, response) <- time (httpGHEvents user pass etag page)
-    (timeToWaitIn_us,etagResponded,firstId,newPage) <-
-            getTimeAndEtagFromResponse t etag response req_time oldFirstId page
-    threadDelay timeToWaitIn_us
-    getEvents user pass etagResponded timeToWaitIn_us firstId newPage
+getEvents :: CallInfo -> IO ()
+getEvents callInfo = do
+  -- Call /events on github
+  (req_time, response) <- time (httpGHEvents (_user callInfo) (_pass callInfo) (_etag callInfo) (_page callInfo))
+  newCallInfo <- getTimeAndEtagFromResponse callInfo response req_time
+  threadDelay (_timeToWait newCallInfo)
+  getEvents newCallInfo
 
 
 getTimeToWaitFromHeaders :: ResponseHeaders -> IO Int
@@ -155,14 +157,9 @@ containsId firstId events = maybe False (\i -> Just i `elem` eventsIds) firstId
         eventsIds :: [Maybe Text]
         eventsIds = maybe [] (^.. _Array . traverse . to (^? key "id" . _String)) events
 
-getTimeAndEtagFromResponse :: Int
-                           -> Maybe B.ByteString
-                           -> Response LZ.ByteString
-                           -> Double
-                           -> Maybe Text
-                           -> Int
-                           -> IO (Int, Maybe B.ByteString,Maybe Text,Int)
-getTimeAndEtagFromResponse oldTime etag response req_time oldFirstId oldPage =
+getTimeAndEtagFromResponse :: CallInfo -> Response LZ.ByteString -> Double -> IO CallInfo
+getTimeAndEtagFromResponse callInfo response req_time = do
+    print callInfo
     if statusIsSuccessful (responseStatus response)
         then do
             let headers = responseHeaders response
@@ -170,32 +167,27 @@ getTimeAndEtagFromResponse oldTime etag response req_time oldFirstId oldPage =
             let etagResponded = lookup "ETag" headers
                 timeToWaitIn_us = max 0 (t - floor (1000000 * req_time))
                 events = decode (responseBody response)
-                nextFirstId = if oldPage == 1 then getFirstId events else oldFirstId
+                nextFirstId = if _page callInfo == 1 then getFirstId events else _firstId callInfo
                 -- Read next pages until we reach the old first ID of the first page
                 -- of the preceeding loop
                 -- return a new page if the first ID wasn't found
-                nextPage = if containsId oldFirstId events && (oldPage < 10)
-                            then oldPage + 1
-                            else 1
-                linkh = lookup "Link" headers
-            publish events oldFirstId
-            print linkh
-            return (timeToWaitIn_us,etagResponded,nextFirstId,nextPage)
+                nextPage = if containsId (_firstId callInfo) events || (_page callInfo >= 10)
+                            then 1
+                            else _page callInfo + 1
+            publish events (_firstId callInfo)
+            return (callInfo {_firstId = nextFirstId, _page = nextPage, _etag = etagResponded, _timeToWait = timeToWaitIn_us})
         else do
             putStrLn (if notModified304 == responseStatus response
                         then "Nothing changed"
                         else "Something went wrong")
-            return (oldTime,etag,oldFirstId,oldPage)
-
--- takeUpUntil :: Maybe Text -> Maybe Value  -> Maybe [Value]
--- takeUpUntil firstId = error "TODO"
+            return callInfo
 
 publish :: Maybe Value -> Maybe Text -> IO ()
-publish events firstId = mapM_ print eventsUntilFirstId
+publish events firstId = mapM_ publishOneEvent eventsUntilFirstId
     where
         eventsUntilFirstId = case events of
           Nothing -> []
           Just evts -> takeWhile (\e -> (e ^? key "id" . _String) /= firstId) (evts ^.. values)
 
--- publishOneEvent :: Value -> IO ()
--- publishOneEvent mEvent = putStrLn "TODO: publish to Kafka"
+publishOneEvent :: Value -> IO ()
+publishOneEvent = LZ.putStrLn . encode . (^? key "id")

@@ -2,38 +2,41 @@
 module Main where
 
 -- import           Data.Conduit
-import qualified Data.HashMap.Strict as H
-import Data.Aeson
-import Control.Lens
-import Data.Aeson.Lens
-import Data.Vector ((!?))
-import Data.Text (Text)
-import Data.Maybe (isNothing)
+import           Control.Lens
+import           Data.Aeson
+import           Data.Aeson.Lens
+import qualified Data.HashMap.Strict        as H
+import           Data.Maybe                 (isNothing)
+import           Data.Text                  (Text)
+import           Data.Vector                ((!?))
 
-import           Network.HTTP.Conduit
-import           Network.HTTP.Types.Header (Header,RequestHeaders,ResponseHeaders)
-import           Network.HTTP.Types.Status (statusIsSuccessful,notModified304)
+import           Control.Concurrent         (threadDelay)
+import qualified Data.ByteString.Char8      as B
 import qualified Data.ByteString.Lazy.Char8 as LZ
-import qualified Data.ByteString.Char8 as B
-import Data.CaseInsensitive (original)
-import Data.Monoid ((<>))
-import Control.Concurrent (threadDelay)
-import System.Environment (getArgs)
-import System.Exit (exitFailure)
-import Data.Time.Format (readTime)
-import Data.Time.Clock.POSIX (getPOSIXTime,utcTimeToPOSIXSeconds)
-import System.Locale (defaultTimeLocale)
-import System.CPUTime (getCPUTime)
+import           Data.CaseInsensitive       (original)
+import           Data.Monoid                ((<>))
+import           Data.Time.Clock.POSIX      (getPOSIXTime,
+                                             utcTimeToPOSIXSeconds)
+import           Data.Time.Format           (readTime)
+import           Network.HTTP.Conduit
+import           Network.HTTP.Types.Header  (Header, RequestHeaders,
+                                             ResponseHeaders)
+import           Network.HTTP.Types.Status  (notModified304, statusIsSuccessful)
+import           System.CPUTime             (getCPUTime)
+import           System.Environment         (getArgs)
+import           System.Exit                (exitFailure)
+import           System.Locale              (defaultTimeLocale)
 
-
-data CallInfo = CallInfo { _user :: String            -- ^ Github username
-                         , _pass :: String            -- ^ Github password
-                         , _etag :: Maybe B.ByteString  -- ^ ETag
-                         , _timeToWait :: Int         -- ^ Time to wait in micro seconds
-                         , _firstId :: Maybe Text     -- ^ First Event Id
-                         , _searchedFirstId :: Maybe Text -- ^ First Event Id searched
-                         , _page :: Int               -- ^ Page
+-- Datas CallInfo contains all necessary information to manage events searching
+data CallInfo = CallInfo { _user            :: String             -- ^ Github username
+                         , _pass            :: String             -- ^ Github password
+                         , _etag            :: Maybe B.ByteString -- ^ ETag
+                         , _timeToWait      :: Int                -- ^ Time to wait in micro seconds
+                         , _firstId         :: Maybe Text         -- ^ First Event Id
+                         , _searchedFirstId :: Maybe Text         -- ^ First Event Id searched
+                         , _page            :: Int                -- ^ Page
                          } deriving (Show)
+
 --------------------------------------------------------------------------------
 -- MAIN
 --------------------------------------------------------------------------------
@@ -63,7 +66,7 @@ authHttpCall :: String
                 -> IO (Response LZ.ByteString)
 authHttpCall url user pass headers params = do
     r <- parseUrl url
-    let request = r {requestHeaders = headers}
+    let request = r {requestHeaders = headers, checkStatus = \_ _ _ -> Nothing}
         requestWithParams = setQueryString params request
         requestWithAuth = applyBasicAuth (B.pack user) (B.pack pass) requestWithParams
     withManager (httpLbs requestWithAuth)
@@ -133,12 +136,15 @@ getFirstId events = events >>= anArray >>= (!? 0) >>= anObject
 getEvents :: CallInfo -> IO ()
 getEvents callInfo = do
   -- Call /events on github
-  (req_time, response) <- time (httpGHEvents (_user callInfo) (_pass callInfo) (_etag callInfo) (_page callInfo))
+  (req_time, response) <- time (httpGHEvents (_user callInfo)
+                                             (_pass callInfo)
+                                             (_etag callInfo)
+                                             (_page callInfo))
   newCallInfo <- getTimeAndEtagFromResponse callInfo response req_time
   threadDelay (_timeToWait newCallInfo)
   getEvents newCallInfo
 
-
+-- | the time to wait between two HTTP calls using headers informations
 getTimeToWaitFromHeaders :: ResponseHeaders -> IO Int
 getTimeToWaitFromHeaders headers = do
     -- Ask current date only if server didn't reponsded with its own
@@ -166,22 +172,32 @@ getTimeAndEtagFromResponse callInfo response req_time = do
         then do
             let headers = responseHeaders response
             t <- getTimeToWaitFromHeaders headers
-            let etagResponded = lookup "ETag" headers
-                timeToWaitIn_us = max 0 (t - floor (1000000 * req_time))
-                events = decode (responseBody response)
-                nextFirstId = if _page callInfo == 1 || isNothing (_firstId callInfo) then getFirstId events else _firstId callInfo
-                containsSearchedFirstId = containsId (_searchedFirstId callInfo) events
-                -- Read next pages until we reach the old first ID of the first page
-                -- of the preceeding loop
-                -- return a new page if the first ID wasn't found
-                nextPage = if containsSearchedFirstId || (_page callInfo >= 10)
-                            then 1
-                            else _page callInfo + 1
-                nextSearchedFirstId = if containsSearchedFirstId || (_page callInfo >= 10)
-                                        then nextFirstId
-                                        else _searchedFirstId callInfo
+            let
+              -- Time to wait is time between two HTTP call minus the time
+              -- the last HTTP call took to answer
+              timeToWaitIn_us = max 0 (t - floor (1000000 * req_time))
+              events = decode (responseBody response)
+              nextFirstId = if _page callInfo == 1 || isNothing (_firstId callInfo)
+                              then getFirstId events
+                              else _firstId callInfo
+              containsSearchedFirstId = containsId (_searchedFirstId callInfo) events
+              etagResponded = lookup "ETag" headers
+              -- Read next pages until we reach the old first ID of the first page
+              -- of the preceeding loop
+              -- return a new page if the first ID wasn't found
+              nextPage = if containsSearchedFirstId || (_page callInfo >= 10)
+                          then 1
+                          else _page callInfo + 1
+              nextSearchedFirstId = if containsSearchedFirstId || (_page callInfo >= 10)
+                                      then nextFirstId
+                                      else _searchedFirstId callInfo
             publish events (_searchedFirstId callInfo)
-            return (callInfo {_firstId = nextFirstId, _page = nextPage, _etag = etagResponded, _timeToWait = timeToWaitIn_us, _searchedFirstId = nextSearchedFirstId})
+            return (callInfo {_firstId = nextFirstId
+                             , _page = nextPage
+                             , _etag = etagResponded
+                             , _timeToWait = timeToWaitIn_us
+                             , _searchedFirstId = nextSearchedFirstId
+                             })
         else do
             putStrLn (if notModified304 == responseStatus response
                         then "Nothing changed"
@@ -193,7 +209,8 @@ publish events firstId = mapM_ publishOneEvent eventsUntilFirstId
     where
         eventsUntilFirstId = case events of
           Nothing -> []
-          Just evts -> takeWhile (\e -> (e ^? key "id" . _String) /= firstId) (evts ^.. values)
+          Just evts -> takeWhile (\e -> (e ^? key "id" . _String) /= firstId)
+                                 (evts ^.. values)
 
 publishOneEvent :: Value -> IO ()
 publishOneEvent = LZ.putStrLn . encode . (^? key "id")

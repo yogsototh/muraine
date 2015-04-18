@@ -8,7 +8,6 @@ import Control.Lens
 import Data.Aeson.Lens
 import Data.Vector ((!?))
 import Data.Text (Text)
-import qualified Data.Text as T
 
 import           Network.HTTP.Conduit
 import           Network.HTTP.Types.Header (Header,RequestHeaders,ResponseHeaders)
@@ -171,17 +170,17 @@ getTimeAndEtagFromResponse oldTime etag response req_time oldFirstId oldPage =
             let etagResponded = lookup "ETag" headers
                 timeToWaitIn_us = max 0 (t - floor (1000000 * req_time))
                 events = decode (responseBody response)
-                firstId = getFirstId events
-                page = if containsId firstId events && (oldPage < 10)
-                          then oldPage + 1
-                          else 1
-                linkh = lookup "Link" headers
-                -- TODO: read all pages until we reach the first ID of the first page
+                nextFirstId = if oldPage == 1 then getFirstId events else oldFirstId
+                -- Read next pages until we reach the old first ID of the first page
                 -- of the preceeding loop
                 -- return a new page if the first ID wasn't found
+                nextPage = if containsId oldFirstId events && (oldPage < 10)
+                            then oldPage + 1
+                            else 1
+                linkh = lookup "Link" headers
             publish events oldFirstId
             print linkh
-            return (timeToWaitIn_us,etagResponded,firstId,page)
+            return (timeToWaitIn_us,etagResponded,nextFirstId,nextPage)
         else do
             putStrLn (if notModified304 == responseStatus response
                         then "Nothing changed"
@@ -192,15 +191,11 @@ getTimeAndEtagFromResponse oldTime etag response req_time oldFirstId oldPage =
 -- takeUpUntil firstId = error "TODO"
 
 publish :: Maybe Value -> Maybe Text -> IO ()
-publish events firstId = do
-    -- let mevents = decode body >>= anArray >>= takeUpUntil firstId
-    -- case mevents of
-    --     Just events -> mapM_ (publishOneEvent firstId) events
-    --     _ -> return ()
-    case firstId of
-         Just txt -> putStrLn (T.unpack txt)
-         _ -> return ()
-    print events
+publish events firstId = mapM_ print eventsUntilFirstId
+    where
+        eventsUntilFirstId = case events of
+          Nothing -> []
+          Just evts -> takeWhile (\e -> (e ^? key "id" . _String) /= firstId) (evts ^.. values)
 
 -- publishOneEvent :: Value -> IO ()
 -- publishOneEvent mEvent = putStrLn "TODO: publish to Kafka"

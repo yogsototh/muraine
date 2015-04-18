@@ -8,6 +8,7 @@ import Control.Lens
 import Data.Aeson.Lens
 import Data.Vector ((!?))
 import Data.Text (Text)
+import Data.Maybe (isNothing)
 
 import           Network.HTTP.Conduit
 import           Network.HTTP.Types.Header (Header,RequestHeaders,ResponseHeaders)
@@ -30,6 +31,7 @@ data CallInfo = CallInfo { _user :: String            -- ^ Github username
                          , _etag :: Maybe B.ByteString  -- ^ ETag
                          , _timeToWait :: Int         -- ^ Time to wait in micro seconds
                          , _firstId :: Maybe Text     -- ^ First Event Id
+                         , _searchedFirstId :: Maybe Text -- ^ First Event Id searched
                          , _page :: Int               -- ^ Page
                          } deriving (Show)
 --------------------------------------------------------------------------------
@@ -40,7 +42,7 @@ main :: IO ()
 main = do
     args <- getArgs
     case args of
-         [user,pass] -> getEvents (CallInfo user pass Nothing 100000 Nothing 1)
+         [user,pass] -> getEvents (CallInfo user pass Nothing 100000 Nothing Nothing 1)
          _ -> showHelpAndExit
 
 --------------------------------------------------------------------------------
@@ -167,15 +169,19 @@ getTimeAndEtagFromResponse callInfo response req_time = do
             let etagResponded = lookup "ETag" headers
                 timeToWaitIn_us = max 0 (t - floor (1000000 * req_time))
                 events = decode (responseBody response)
-                nextFirstId = if _page callInfo == 1 then getFirstId events else _firstId callInfo
+                nextFirstId = if _page callInfo == 1 || isNothing (_firstId callInfo) then getFirstId events else _firstId callInfo
+                containsSearchedFirstId = containsId (_searchedFirstId callInfo) events
                 -- Read next pages until we reach the old first ID of the first page
                 -- of the preceeding loop
                 -- return a new page if the first ID wasn't found
-                nextPage = if containsId (_firstId callInfo) events || (_page callInfo >= 10)
+                nextPage = if containsSearchedFirstId || (_page callInfo >= 10)
                             then 1
                             else _page callInfo + 1
-            publish events (_firstId callInfo)
-            return (callInfo {_firstId = nextFirstId, _page = nextPage, _etag = etagResponded, _timeToWait = timeToWaitIn_us})
+                nextSearchedFirstId = if containsSearchedFirstId || (_page callInfo >= 10)
+                                        then nextFirstId
+                                        else _searchedFirstId callInfo
+            publish events (_searchedFirstId callInfo)
+            return (callInfo {_firstId = nextFirstId, _page = nextPage, _etag = etagResponded, _timeToWait = timeToWaitIn_us, _searchedFirstId = nextSearchedFirstId})
         else do
             putStrLn (if notModified304 == responseStatus response
                         then "Nothing changed"

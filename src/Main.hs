@@ -8,7 +8,8 @@ import           Data.Aeson.Lens
 import qualified Data.HashMap.Strict        as H
 import           Data.Maybe                 (isNothing)
 import           Data.Text                  (Text)
-import           Data.Vector                ((!?))
+import qualified Data.Vector as V
+import           Data.Vector                ((!?),Vector)
 
 import           Control.Concurrent         (threadDelay)
 import qualified Data.ByteString.Char8      as B
@@ -33,6 +34,7 @@ data CallInfo = CallInfo { _user            :: String             -- ^ Github us
                          , _etag            :: Maybe B.ByteString -- ^ ETag
                          , _timeToWait      :: Int                -- ^ Time to wait in micro seconds
                          , _firstId         :: Maybe Text         -- ^ First Event Id
+                         , _lastId          :: Maybe Text         -- ^ Last  Event Id
                          , _searchedFirstId :: Maybe Text         -- ^ First Event Id searched
                          , _page            :: Int                -- ^ Page
                          } deriving (Show)
@@ -45,7 +47,7 @@ main :: IO ()
 main = do
     args <- getArgs
     case args of
-         [user,pass] -> getEvents (CallInfo user pass Nothing 100000 Nothing Nothing 1)
+         [user,pass] -> getEvents (CallInfo user pass Nothing 100000 Nothing Nothing Nothing 1)
          _ -> showHelpAndExit
 
 --------------------------------------------------------------------------------
@@ -128,6 +130,12 @@ getFirstId :: Maybe Value -> Maybe Text
 getFirstId events = events >>= anArray >>= (!? 0) >>= anObject
                     >>= H.lookup "id" >>= aString
 
+safeVLast :: Vector a -> Maybe a
+safeVLast v = if V.null v then Nothing else Just (V.last v)
+
+getLastId :: Maybe Value -> Maybe Text
+getLastId events = events >>= anArray >>= safeVLast >>= anObject
+                    >>= H.lookup "id" >>= aString
 --------------------------------------------------------------------------------
 -- The Algorithm of getting events
 --------------------------------------------------------------------------------
@@ -180,6 +188,7 @@ getTimeAndEtagFromResponse callInfo response req_time = do
               nextFirstId = if _page callInfo == 1 || isNothing (_firstId callInfo)
                               then getFirstId events
                               else _firstId callInfo
+              nextLastId = getLastId events
               containsSearchedFirstId = containsId (_searchedFirstId callInfo) events
               etagResponded = lookup "ETag" headers
               -- Read next pages until we reach the old first ID of the first page
@@ -191,8 +200,9 @@ getTimeAndEtagFromResponse callInfo response req_time = do
               nextSearchedFirstId = if containsSearchedFirstId || (_page callInfo >= 10)
                                       then nextFirstId
                                       else _searchedFirstId callInfo
-            publish events (_searchedFirstId callInfo)
-            return (callInfo {_firstId = nextFirstId
+            publish events (_searchedFirstId callInfo) (_lastId callInfo)
+            return (callInfo { _firstId = nextFirstId
+                             , _lastId = nextLastId
                              , _page = nextPage
                              , _etag = etagResponded
                              , _timeToWait = timeToWaitIn_us
@@ -204,13 +214,23 @@ getTimeAndEtagFromResponse callInfo response req_time = do
                         else "Something went wrong")
             return callInfo
 
-publish :: Maybe Value -> Maybe Text -> IO ()
-publish events firstId = mapM_ publishOneEvent eventsUntilFirstId
+publish :: Maybe Value -> Maybe Text -> Maybe Text -> IO ()
+publish events firstId lastId = mapM_ publishOneEvent eventsUntilFirstId
     where
-        eventsUntilFirstId = case events of
+      getId e = e ^? key "id" . _String
+      guillotine :: (a -> Bool) -> [a] -> [a]
+      guillotine _ [] = []
+      guillotine f (x:xs) = if f x then xs else x:xs
+      removeOld evts = case lastId of
+        Nothing -> evts ^.. values
+        Just _  -> if containsId lastId (Just evts)
+                      then dropWhile ((/= lastId) . getId) (evts ^.. values)
+                      else evts ^.. values
+      eventsUntilFirstId = case events of
           Nothing -> []
-          Just evts -> takeWhile (\e -> (e ^? key "id" . _String) /= firstId)
-                                 (evts ^.. values)
+          Just evts -> takeWhile ((/= firstId) . getId) $
+                       guillotine ((== lastId) . getId) $
+                       removeOld evts
 
 publishOneEvent :: Value -> IO ()
 publishOneEvent = LZ.putStrLn . encode . (^? key "id")

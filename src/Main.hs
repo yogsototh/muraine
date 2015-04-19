@@ -8,8 +8,9 @@ import           Data.Aeson.Lens
 import qualified Data.HashMap.Strict        as H
 import           Data.Maybe                 (isNothing)
 import           Data.Text                  (Text)
-import qualified Data.Vector as V
-import           Data.Vector                ((!?),Vector)
+import           Data.Vector                (Vector, (!?))
+import qualified Data.Vector                as V
+import           System.IO
 
 import           Control.Concurrent         (threadDelay)
 import qualified Data.ByteString.Char8      as B
@@ -47,13 +48,22 @@ main :: IO ()
 main = do
     args <- getArgs
     case args of
-         [user,pass] -> getEvents (CallInfo user pass Nothing 100000 Nothing Nothing Nothing 1)
+         [user,pass] -> let initCallInfo = CallInfo { _user = user
+                                                    , _pass = pass
+                                                    , _etag = Nothing
+                                                    , _timeToWait = 100000
+                                                    , _firstId = Nothing
+                                                    , _lastId = Nothing
+                                                    , _searchedFirstId = Nothing
+                                                    , _page = 1
+                                                    }
+                        in iterateM_ getEvents initCallInfo
          _ -> showHelpAndExit
 
 --------------------------------------------------------------------------------
 showHelpAndExit :: IO ()
 showHelpAndExit = do
-    putStrLn "provide your github username and password please"
+    hPutStrLn stderr "provide your github username and password please"
     exitFailure
 
 --------------------------------------------------------------------------------
@@ -78,8 +88,7 @@ httpGHEvents :: String
                 -> Maybe B.ByteString
                 -> Int
                 -> IO (Response LZ.ByteString)
-httpGHEvents user pass etag page = do
-    print params
+httpGHEvents user pass etag page =
     authHttpCall "https://api.github.com/events" user pass headers params
       where
           headers = ("User-Agent","HTTP-Conduit"):
@@ -140,17 +149,27 @@ getLastId events = events >>= anArray >>= safeVLast >>= anObject
 -- The Algorithm of getting events
 --------------------------------------------------------------------------------
 
--- | Getting events
-getEvents :: CallInfo -> IO ()
+-- | Iterate in a monad, mainly the safe as:
+--
+-- @
+-- x1 <- f x0
+-- x2 <- f x1
+-- ...
+-- @
+iterateM_ :: Monad m => (a -> m a) -> a -> m ()
+iterateM_ f x = f x >>= iterateM_ f
+
+-- | Getting events return the next CallInfo for the next call
+getEvents :: CallInfo -> IO CallInfo
 getEvents callInfo = do
   -- Call /events on github
   (req_time, response) <- time (httpGHEvents (_user callInfo)
                                              (_pass callInfo)
                                              (_etag callInfo)
                                              (_page callInfo))
-  newCallInfo <- getTimeAndEtagFromResponse callInfo response req_time
+  newCallInfo <- getCallInfoFromResponse callInfo response req_time
   threadDelay (_timeToWait newCallInfo)
-  getEvents newCallInfo
+  return newCallInfo
 
 -- | the time to wait between two HTTP calls using headers informations
 getTimeToWaitFromHeaders :: ResponseHeaders -> IO Int
@@ -173,9 +192,11 @@ containsId firstId events = maybe False (\i -> Just i `elem` eventsIds) firstId
         eventsIds :: [Maybe Text]
         eventsIds = maybe [] (^.. _Array . traverse . to (^? key "id" . _String)) events
 
-getTimeAndEtagFromResponse :: CallInfo -> Response LZ.ByteString -> Double -> IO CallInfo
-getTimeAndEtagFromResponse callInfo response req_time = do
-    print callInfo
+-- | given an HTTP response compute the next CallInfo and also publish events
+-- Beware, this is an heuristic with the hypothesis that there is no more than
+-- one page to download, by one page.
+getCallInfoFromResponse :: CallInfo -> Response LZ.ByteString -> Double -> IO CallInfo
+getCallInfoFromResponse callInfo response req_time =
     if statusIsSuccessful (responseStatus response)
         then do
             let headers = responseHeaders response
@@ -209,14 +230,18 @@ getTimeAndEtagFromResponse callInfo response req_time = do
                              , _searchedFirstId = nextSearchedFirstId
                              })
         else do
-            putStrLn (if notModified304 == responseStatus response
-                        then "Nothing changed"
-                        else "Something went wrong")
+            hPutStrLn stderr (if notModified304 == responseStatus response
+                              then "Nothing changed"
+                              else "Something went wrong")
             return callInfo
 
-publish :: Maybe Value -> Maybe Text -> Maybe Text -> IO ()
-publish events firstId lastId = mapM_ publishOneEvent eventsUntilFirstId
-    where
+selectEvents :: Maybe Value -> Maybe Text -> Maybe Text -> [Value]
+selectEvents events firstId lastId = case events of
+          Nothing -> []
+          Just evts -> (takeWhile ((/= firstId) . getId)
+                        . guillotine ((== lastId) . getId)
+                        . removeOld) evts
+  where
       getId e = e ^? key "id" . _String
       guillotine :: (a -> Bool) -> [a] -> [a]
       guillotine _ [] = []
@@ -226,11 +251,9 @@ publish events firstId lastId = mapM_ publishOneEvent eventsUntilFirstId
         Just _  -> if containsId lastId (Just evts)
                       then dropWhile ((/= lastId) . getId) (evts ^.. values)
                       else evts ^.. values
-      eventsUntilFirstId = case events of
-          Nothing -> []
-          Just evts -> takeWhile ((/= firstId) . getId) $
-                       guillotine ((== lastId) . getId) $
-                       removeOld evts
+
+publish :: Maybe Value -> Maybe Text -> Maybe Text -> IO ()
+publish events firstId lastId = mapM_ publishOneEvent (selectEvents events firstId lastId)
 
 publishOneEvent :: Value -> IO ()
-publishOneEvent = LZ.putStrLn . encode . (^? key "id")
+publishOneEvent = LZ.putStrLn . encode -- . (^? key "id")

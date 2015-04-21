@@ -29,6 +29,9 @@ import           System.Environment         (getArgs)
 import           System.Exit                (exitFailure)
 import           System.Locale              (defaultTimeLocale)
 
+import           Network.Nats (Nats)
+import qualified Network.Nats as Nats
+
 -- Datas CallInfo contains all necessary information to manage events searching
 data CallInfo = CallInfo { _user            :: String             -- ^ Github username
                          , _pass            :: String             -- ^ Github password
@@ -38,7 +41,9 @@ data CallInfo = CallInfo { _user            :: String             -- ^ Github us
                          , _lastId          :: Maybe Text         -- ^ Last  Event Id
                          , _searchedFirstId :: Maybe Text         -- ^ First Event Id searched
                          , _page            :: Int                -- ^ Page
-                         } deriving (Show)
+                         , _nats            :: Nats               -- ^ NATS connection object
+                         , _topic           :: String             -- ^ NATS Topic
+                         }
 
 --------------------------------------------------------------------------------
 -- MAIN
@@ -46,19 +51,24 @@ data CallInfo = CallInfo { _user            :: String             -- ^ Github us
 
 main :: IO ()
 main = do
-    args <- getArgs
-    case args of
-         [user,pass] -> let initCallInfo = CallInfo { _user = user
-                                                    , _pass = pass
-                                                    , _etag = Nothing
-                                                    , _timeToWait = 100000
-                                                    , _firstId = Nothing
-                                                    , _lastId = Nothing
-                                                    , _searchedFirstId = Nothing
-                                                    , _page = 1
-                                                    }
-                        in iterateM_ getEvents initCallInfo
-         _ -> showHelpAndExit
+     args <- getArgs
+     case args of
+          [user,pass] -> do
+            nats <- Nats.connect "nats://localhost:4222"
+            let initCallInfo = CallInfo { _user = user
+                                        , _pass = pass
+                                        , _etag = Nothing
+                                        , _timeToWait = 100000
+                                        , _firstId = Nothing
+                                        , _lastId = Nothing
+                                        , _searchedFirstId = Nothing
+                                        , _page = 1
+                                        , _nats = nats
+                                        , _topic = "ghevents"
+                                        }
+            iterateM_ getEvents initCallInfo
+          _ -> showHelpAndExit
+
 
 --------------------------------------------------------------------------------
 showHelpAndExit :: IO ()
@@ -221,7 +231,7 @@ getCallInfoFromResponse callInfo response req_time =
               nextSearchedFirstId = if containsSearchedFirstId || (_page callInfo >= 10)
                                       then nextFirstId
                                       else _searchedFirstId callInfo
-            publish events (_searchedFirstId callInfo) (_lastId callInfo)
+            publish callInfo events
             return (callInfo { _firstId = nextFirstId
                              , _lastId = nextLastId
                              , _page = nextPage
@@ -252,8 +262,8 @@ selectEvents events firstId lastId = case events of
                       then dropWhile ((/= lastId) . getId) (evts ^.. values)
                       else evts ^.. values
 
-publish :: Maybe Value -> Maybe Text -> Maybe Text -> IO ()
-publish events firstId lastId = mapM_ publishOneEvent (selectEvents events firstId lastId)
+publish :: CallInfo -> Maybe Value -> IO ()
+publish callInfo events = mapM_ (publishOneEvent callInfo) (selectEvents events (_firstId callInfo) (_lastId callInfo))
 
-publishOneEvent :: Value -> IO ()
-publishOneEvent = LZ.putStrLn . encode -- . (^? key "id")
+publishOneEvent :: CallInfo -> Value -> IO ()
+publishOneEvent callInfo = Nats.publish (_nats callInfo) (_topic callInfo) . encode -- . (^? key "id")

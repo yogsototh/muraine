@@ -32,6 +32,9 @@ import           System.Locale              (defaultTimeLocale)
 import           Network.Nats (Nats)
 import qualified Network.Nats as Nats
 
+import qualified Control.Exception as EX
+import           Control.Exception (SomeException)
+
 -- Datas CallInfo contains all necessary information to manage events searching
 data CallInfo = CallInfo { _user            :: String             -- ^ Github username
                          , _pass            :: String             -- ^ Github password
@@ -41,7 +44,7 @@ data CallInfo = CallInfo { _user            :: String             -- ^ Github us
                          , _lastId          :: Maybe Text         -- ^ Last  Event Id
                          , _searchedFirstId :: Maybe Text         -- ^ First Event Id searched
                          , _page            :: Int                -- ^ Page
-                         , _nats            :: Nats               -- ^ NATS connection object
+                         , _nats            :: Maybe Nats         -- ^ NATS connection object
                          , _topic           :: String             -- ^ NATS Topic
                          }
 
@@ -54,21 +57,27 @@ main = do
      args <- getArgs
      case args of
           [user,pass] -> do
-            nats <- Nats.connect "nats://localhost:4222"
-            let initCallInfo = CallInfo { _user = user
-                                        , _pass = pass
-                                        , _etag = Nothing
-                                        , _timeToWait = 100000
-                                        , _firstId = Nothing
-                                        , _lastId = Nothing
-                                        , _searchedFirstId = Nothing
-                                        , _page = 1
-                                        , _nats = nats
-                                        , _topic = "ghevents"
-                                        }
-            iterateM_ getEvents initCallInfo
+              nats <- EX.catch (fmap Just (Nats.connect "nats://localhost:4222")) handleNatsException
+              let initCallInfo = CallInfo { _user = user
+                                          , _pass = pass
+                                          , _etag = Nothing
+                                          , _timeToWait = 100000
+                                          , _firstId = Nothing
+                                          , _lastId = Nothing
+                                          , _searchedFirstId = Nothing
+                                          , _page = 1
+                                          , _nats = nats
+                                          , _topic = "ghevents"
+                                          }
+              iterateM_ getEvents initCallInfo
           _ -> showHelpAndExit
 
+
+handleNatsException :: SomeException -> IO (Maybe Nats)
+handleNatsException e = do
+  hPrint stderr e
+  hPutStrLn stderr "Will write to standard output"
+  return Nothing
 
 --------------------------------------------------------------------------------
 showHelpAndExit :: IO ()
@@ -266,4 +275,6 @@ publish :: CallInfo -> Maybe Value -> IO ()
 publish callInfo events = mapM_ (publishOneEvent callInfo) (selectEvents events (_firstId callInfo) (_lastId callInfo))
 
 publishOneEvent :: CallInfo -> Value -> IO ()
-publishOneEvent callInfo = Nats.publish (_nats callInfo) (_topic callInfo) . encode -- . (^? key "id")
+publishOneEvent callInfo = case _nats callInfo of
+                                Just nats -> Nats.publish nats (_topic callInfo) . encode -- . (^? key "id")
+                                Nothing-> LZ.putStrLn . encode -- . (^? key "id")

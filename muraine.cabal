@@ -20,7 +20,7 @@ executable muraine
   main-is:             Main.hs
   -- other-modules:
   -- other-extensions:
-  build-depends:       base >=4.7 && <4.8
+  build-depends:       base
                        , aeson
                        , bytestring
                        , case-insensitive
@@ -42,7 +42,7 @@ executable nats-consumer
   main-is:             Consumer.hs
   -- other-modules:
   -- other-extensions:
-  build-depends:       base >=4.7 && <4.8
+  build-depends:       base
                        , bytestring
                        , nats-queue
   hs-source-dirs:      src/

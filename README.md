@@ -8,21 +8,15 @@ See <yannesposito.com> for the blog post.
 
 ## INSTALL
 
-1. Install Haskell
+1. Install [`stack`](http://docs.haskellstack.org/en/stable/README.html)
+2. Install [nats](https://nats.io): `brew install gnatsd`
 2. clone the repository
-3. `cabal install -j --only-dependencies`
-4. `cabal build muraine`
-4. `cabal build nats-consumer`
+3. `stack setup`
+4. `stack build`
 
 ## Usage
 
-Install nats
-
-```
-> brew install gnatsd
-```
-
-Launch it:
+Launch nats:
 
 ```
 > gnatsd
@@ -31,14 +25,14 @@ Launch it:
 And in another terminal:
 
 ```
-> cabal run GITHUB_LOGIN GITHUB_PASSWORD
+> stack exec muraine -- GITHUB_LOGIN GITHUB_PASSWORD
 ```
 
 This will send the datas to `NATS`.
 
-To read the content you could:
+To read the content you could use `nats-consumer`:
 
 ```
-> ./dist/build/nats-consumer/nats-consumer ghevents
+> nats-consumer ghevents
 ```
 
